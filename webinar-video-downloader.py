@@ -48,7 +48,10 @@ def find_video_urls(driver, url):
     # Probeer play button te vinden en te klikken
     try:
         print("Zoeken naar play button...")
-        play_buttons = driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='play'], button[class*='play'], .play-button, [class*='PlayButton']")
+        play_buttons = driver.find_elements(
+            By.CSS_SELECTOR,
+            "button[aria-label*='play'], button[class*='play'], .play-button, [class*='PlayButton']",
+        )
         for button in play_buttons:
             try:
                 print(f"Play button gevonden, proberen te klikken...")
@@ -91,7 +94,16 @@ def find_video_urls(driver, url):
             src = iframe.get_attribute("src")
             if src:
                 print(f"  Iframe src: {src}")
-                if any(platform in src for platform in ["vimeo.com", "youtube.com", "wistia", "jwplayer", "cloudfront"]):
+                if any(
+                    platform in src
+                    for platform in [
+                        "vimeo.com",
+                        "youtube.com",
+                        "wistia",
+                        "jwplayer",
+                        "cloudfront",
+                    ]
+                ):
                     video_urls.append(src)
     except Exception as e:
         print(f"Fout bij zoeken iframes: {e}")
@@ -108,14 +120,31 @@ def find_video_urls(driver, url):
                     mime_type = log["params"]["response"].get("mimeType", "")
 
                     # Zoek naar video gerelateerde URLs
-                    if any(ext in resp_url for ext in [".m3u8", ".mp4", ".webm", ".ts", "master.m3u8", "playlist.m3u8"]):
+                    if any(
+                        ext in resp_url
+                        for ext in [
+                            ".m3u8",
+                            ".mp4",
+                            ".webm",
+                            ".ts",
+                            "master.m3u8",
+                            "playlist.m3u8",
+                        ]
+                    ):
                         # Geef prioriteit aan master.m3u8 of playlist met "master" in de naam
-                        if "master" in resp_url.lower() or "playlist" in resp_url.lower():
+                        if (
+                            "master" in resp_url.lower()
+                            or "playlist" in resp_url.lower()
+                        ):
                             print(f"  Network (MASTER): {resp_url}")
                         else:
                             print(f"  Network: {resp_url}")
                         video_urls.append(resp_url)
-                    elif "video" in mime_type or "mpegurl" in mime_type or "audio" in mime_type:
+                    elif (
+                        "video" in mime_type
+                        or "mpegurl" in mime_type
+                        or "audio" in mime_type
+                    ):
                         print(f"  Network (mime: {mime_type}): {resp_url}")
                         video_urls.append(resp_url)
             except:
@@ -136,9 +165,39 @@ def find_video_urls(driver, url):
 
     # Filter uit manifest en andere niet-video bestanden
     filtered_urls = [
-        url for url in video_urls
-        if not any(skip in url for skip in ["manifest.webmanifest", "favicon", ".css", ".js"])
+        url
+        for url in video_urls
+        if not any(
+            skip in url for skip in ["manifest.webmanifest", "favicon", ".css", ".js"]
+        )
     ]
+
+    # Print alle gevonden m3u8 URLs voor analyse EN test ze op audio
+    m3u8_urls = [u for u in filtered_urls if ".m3u8" in u]
+    if m3u8_urls:
+        print(f"\n📋 Gevonden {len(m3u8_urls)} m3u8 playlist(s):")
+        import urllib.request
+
+        for m3u8 in m3u8_urls:
+            has_audio = "?"
+            try:
+                req = urllib.request.Request(m3u8)
+                req.add_header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                )
+                req.add_header("Referer", "https://webinar.verzekeraars.nl/")
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    content = response.read().decode("utf-8")
+                    if "TYPE=AUDIO" in content or "AUDIO=" in content:
+                        has_audio = "✓ AUDIO"
+                    elif "#EXT-X-STREAM-INF" in content:
+                        has_audio = "🔗 MASTER"
+                    else:
+                        has_audio = "✗ video-only"
+            except:
+                pass
+            print(f"   [{has_audio}] {m3u8}")
 
     return list(set(filtered_urls))  # Verwijder duplicaten
 
@@ -185,71 +244,190 @@ def download_with_ytdlp(url, output_file="webinar_video.mp4"):
         return False
 
 
-def download_m3u8_with_ffmpeg(m3u8_url, output_file="webinar_video.mp4"):
+def check_for_master_playlist(m3u8_url):
+    """Probeer een master playlist te vinden die audio bevat"""
+    import urllib.request
+
+    potential_masters = []
+
+    # Extract base directory
+    base_dir = m3u8_url.rsplit("/", 1)[0]
+
+    # Probeer verschillende master playlist locaties
+    potential_masters.append(f"{base_dir}/master.m3u8")
+    potential_masters.append(f"{base_dir}/index.m3u8")
+    potential_masters.append(f"{base_dir}/playlist.m3u8")
+
+    # Ook een niveau hoger proberen
+    parent_dir = base_dir.rsplit("/", 1)[0]
+    potential_masters.append(f"{parent_dir}/master.m3u8")
+    potential_masters.append(f"{parent_dir}/index.m3u8")
+
+    print(f"\n🔍 Zoeken naar master playlist met audio...")
+
+    for master_url in potential_masters:
+        try:
+            req = urllib.request.Request(master_url)
+            req.add_header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
+            with urllib.request.urlopen(req, timeout=5) as response:
+                content = response.read().decode("utf-8")
+                # Check of het een master playlist is met audio
+                if "TYPE=AUDIO" in content or "AUDIO=" in content:
+                    print(f"✓ Master playlist gevonden met audio: {master_url}")
+                    return master_url
+                elif "#EXT-X-STREAM-INF" in content:
+                    print(
+                        f"  Master playlist gevonden (zonder audio tag): {master_url}"
+                    )
+                    return master_url
+        except:
+            continue
+
+    print("⚠️  Geen master playlist gevonden")
+    return None
+
+
+def download_m3u8_with_ffmpeg(
+    m3u8_url, output_file="webinar_video.mp4", test_mode=False
+):
     """Download HLS stream met ffmpeg"""
     try:
-        # Eerst proberen met codec copy (snelst)
+        # Test eerst wat er in de m3u8 zit
+        print(f"\n🔍 Analyseren m3u8 playlist: {m3u8_url}")
+        import urllib.request
+
+        playlist_content = None
+        try:
+            req = urllib.request.Request(m3u8_url)
+            req.add_header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            )
+
+            with urllib.request.urlopen(req) as response:
+                playlist_content = response.read().decode("utf-8")
+                print("📋 Playlist inhoud (eerste 20 regels):")
+                for i, line in enumerate(playlist_content.split("\n")[:20], 1):
+                    if line.strip():
+                        print(f"  {i:2}. {line}")
+
+                # Check voor audio stream
+                has_audio_indicator = any(
+                    keyword in playlist_content.lower()
+                    for keyword in ["audio", "sound", "TYPE=AUDIO"]
+                )
+                if has_audio_indicator:
+                    print("✓ Audio stream referentie gevonden in playlist")
+                else:
+                    print("⚠️  Geen audio stream referentie gevonden in playlist")
+
+                    # Probeer master playlist te vinden
+                    master_url = check_for_master_playlist(m3u8_url)
+                    if master_url and master_url != m3u8_url:
+                        print(f"🔄 Gebruik master playlist in plaats van huidige")
+                        m3u8_url = master_url
+        except Exception as e:
+            print(f"⚠️  Kan playlist niet lezen: {e}")
+
+        # Eerste poging met codec copy (snelst)
         cmd = [
             "ffmpeg",
-            "-y",  # Overschrijf output file
+            "-y",
             "-user_agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "-headers",
             "Referer: https://webinar.verzekeraars.nl/",
             "-i",
             m3u8_url,
-            "-c",
-            "copy",
-            "-bsf:a",
-            "aac_adtstoasc",
-            "-loglevel",
-            "info",
-            output_file,
         ]
 
-        print(f"Downloaden HLS stream met ffmpeg: {m3u8_url}")
+        # Test mode: download alleen eerste 30 seconden
+        if test_mode:
+            cmd.extend(["-t", "30"])
+            print("\n⚡ TEST MODE: Downloaden eerste 30 seconden...")
+
+        cmd.extend(
+            [
+                "-c",
+                "copy",
+                "-bsf:a",
+                "aac_adtstoasc",
+                "-progress",
+                "pipe:1",  # Progress naar stdout
+                "-loglevel",
+                "error",  # Alleen errors, niet alle ts files
+                "-stats",  # Show stats
+                output_file,
+            ]
+        )
+
+        print(f"\n🎬 Downloaden HLS stream...")
         print("=" * 50)
         result = subprocess.run(cmd)
 
         if result.returncode == 0:
             # Check of er audio is
-            print("\nControleren of audio aanwezig is...")
-            check_cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", output_file]
+            print("\n🔍 Controleren streams in gedownloade video...")
+            check_cmd = [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,codec_name",
+                "-of",
+                "json",
+                output_file,
+            ]
             check_result = subprocess.run(check_cmd, capture_output=True, text=True)
 
-            if check_result.stdout.strip() == "audio":
-                print("=" * 50)
-                print(f"✓ Video succesvol gedownload naar: {output_file}")
-                print("✓ Audio stream aanwezig")
-                return True
-            else:
-                print("⚠️  Geen audio gevonden, probeer opnieuw met re-encoding...")
-                # Probeer opnieuw met re-encoding (langzamer maar betrouwbaarder)
-                cmd_reencode = [
-                    "ffmpeg",
-                    "-y",
-                    "-user_agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "-headers",
-                    "Referer: https://webinar.verzekeraars.nl/",
-                    "-i",
-                    m3u8_url,
-                    "-c:v", "libx264",  # Re-encode video
-                    "-c:a", "aac",      # Re-encode audio
-                    "-strict", "experimental",
-                    "-loglevel",
-                    "info",
-                    output_file,
+            try:
+                streams_info = json.loads(check_result.stdout)
+                video_streams = [
+                    s
+                    for s in streams_info.get("streams", [])
+                    if s["codec_type"] == "video"
                 ]
-                result = subprocess.run(cmd_reencode)
-                if result.returncode == 0:
+                audio_streams = [
+                    s
+                    for s in streams_info.get("streams", [])
+                    if s["codec_type"] == "audio"
+                ]
+
+                print(f"📹 Video streams: {len(video_streams)}")
+                for vs in video_streams:
+                    print(f"   - {vs.get('codec_name', 'unknown')}")
+
+                print(f"🔊 Audio streams: {len(audio_streams)}")
+                for aus in audio_streams:
+                    print(f"   - {aus.get('codec_name', 'unknown')}")
+
+                if audio_streams:
                     print("=" * 50)
-                    print(f"✓ Video succesvol gedownload naar: {output_file} (met re-encoding)")
+                    print(f"✓ Video succesvol gedownload naar: {output_file}")
+                    print("✓ Audio stream aanwezig")
                     return True
                 else:
-                    print("=" * 50)
-                    print(f"✗ Download mislukt met return code: {result.returncode}")
-                    return False
+                    print("\n⚠️  Geen audio stream gevonden!")
+                    print("Dit kan betekenen dat:")
+                    print(
+                        "  1. De video origineel geen audio heeft (opname zonder geluid)"
+                    )
+                    print("  2. Audio zit in een aparte m3u8 playlist")
+                    print(
+                        "  3. De browser gebruikte een andere URL die wij niet detecteerden"
+                    )
+                    print("\n💡 Tip: Open de pagina in Chrome DevTools -> Network tab")
+                    print(
+                        "    Filter op 'm3u8' en kijk of je MEERDERE playlists ziet laden"
+                    )
+                    print("    (een voor video, een voor audio)")
+                    return True  # Video werkt, alleen geen audio
+            except Exception as e:
+                print(f"⚠️  Kan streams niet analyseren: {e}")
+                return True
         else:
             print("=" * 50)
             print(f"✗ Download mislukt met return code: {result.returncode}")
@@ -260,11 +438,17 @@ def download_m3u8_with_ffmpeg(m3u8_url, output_file="webinar_video.mp4"):
 
 
 def main():
-    url = "https://webinar.verzekeraars.nl/053d4f4f-9b5c-f011-bec2-6045bd9668a2/o/f558ef39-0e9d-f011-bbd3-7c1e527279e4"
+    url = "https://www.youtube.com/watch?v=15Z5nsyLDbE"
+
+    # Check voor test mode argument
+    test_mode = "--test" in sys.argv or "-t" in sys.argv
 
     print("Video downloader voor webinar pagina's")
     print("=" * 50)
-    print(f"URL: {url}\n")
+    print(f"URL: {url}")
+    if test_mode:
+        print("⚡ TEST MODE: Download alleen eerste 30 seconden")
+    print()
 
     # Stap 1: Setup browser en vind video URLs
     print("Stap 1: Browser openen en video URLs zoeken...")
@@ -305,19 +489,21 @@ def main():
             # Als we .ts segmenten vinden, probeer de m3u8 playlist af te leiden
             ts_urls = [u for u in video_urls if ".ts" in u]
             if ts_urls and not any(".m3u8" in u for u in video_urls):
-                print("\n⚠️  Alleen .ts segmenten gevonden, probeer m3u8 playlist af te leiden...")
+                print(
+                    "\n⚠️  Alleen .ts segmenten gevonden, probeer m3u8 playlist af te leiden..."
+                )
                 # Van: /recordings/xxx/yyy-00.ts -> /recordings/xxx/yyy.m3u8
                 for ts_url in ts_urls:
                     # Probeer verschillende varianten
                     potential_playlists = []
 
                     # Variant 1: vervang -00.ts met .m3u8
-                    variant1 = re.sub(r'-\d+\.ts$', '.m3u8', ts_url)
+                    variant1 = re.sub(r"-\d+\.ts$", ".m3u8", ts_url)
                     if variant1 != ts_url:
                         potential_playlists.append(variant1)
 
                     # Variant 2: master.m3u8 in dezelfde directory
-                    base_url = ts_url.rsplit('/', 1)[0]
+                    base_url = ts_url.rsplit("/", 1)[0]
                     potential_playlists.append(f"{base_url}/master.m3u8")
                     potential_playlists.append(f"{base_url}/playlist.m3u8")
 
@@ -328,14 +514,21 @@ def main():
 
             print(f"\nProbeer {len(sorted_urls)} URL(s) in volgorde van prioriteit:")
             for i, url in enumerate(sorted_urls, 1):
-                url_type = "M3U8 playlist" if ".m3u8" in url else "MP4" if ".mp4" in url else "TS segment" if ".ts" in url else "Andere"
+                url_type = (
+                    "M3U8 playlist"
+                    if ".m3u8" in url
+                    else "MP4"
+                    if ".mp4" in url
+                    else "TS segment"
+                    if ".ts" in url
+                    else "Andere"
+                )
                 print(f"{i}. [{url_type}] {url[:80]}...")
 
             for video_url in sorted_urls:
                 if ".m3u8" in video_url:
                     # Voor HLS streams, gebruik ffmpeg (of yt-dlp)
-                    print(f"\n🎬 Downloaden HLS stream: {video_url}")
-                    if download_m3u8_with_ffmpeg(video_url):
+                    if download_m3u8_with_ffmpeg(video_url, test_mode=test_mode):
                         break
                     elif download_with_ytdlp(video_url):
                         break
@@ -361,7 +554,9 @@ if __name__ == "__main__":
     print("2. pip install yt-dlp")
     print("3. Chrome browser")
     print("4. ChromeDriver (download van https://chromedriver.chromium.org/)")
-    print("5. ffmpeg (optioneel, voor HLS streams)\n")
+    print("5. ffmpeg (optioneel, voor HLS streams)")
+    print("\nOpties:")
+    print("  --test of -t : Download alleen eerste 30 seconden (voor testen)\n")
 
     try:
         main()
